@@ -10,6 +10,7 @@
 #endif
 
 #include "ti_msp_dl_config.h"
+#include "stdio.h"
 #include "oled.h"
 #include "board.h"
 #include "encoder.h"
@@ -19,11 +20,10 @@
 #include "interrupt.h"
 #include "LineTrack.h"
 #include "stepper.h"
-#include "servo.h"
-#include "stdio.h"
+
 extern int target_speed_left,target_speed_right;
 extern float pwmout_left,pwmout_right;
-extern int LineTrack_Flag;
+extern int LineTrack_Flag; 
 extern int Yaw_Flag;
 #endif
 
