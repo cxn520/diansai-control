@@ -59,6 +59,8 @@ int main(void)
     Stepper_Init();
     delay_ms(200); 
     Stepper_Move_Relative(STEPPER_ADDR_CHASSIS, STEPPER_DIR_CW, 6400); 
+    
+    Stepper_Move_Relative(STEPPER_ADDR_CHASSIS, STEPPER_DIR_CW, 6400); 
     while (1) 
     {
         Oled_Task();
