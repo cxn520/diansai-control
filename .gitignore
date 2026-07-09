@@ -1,0 +1,14 @@
+Debug/
+Release/
+
+*.o
+*.obj
+*.d
+*.out
+*.map
+*.opt
+*.log
+*.tmp
+
+.DS_Store
+Thumbs.db
