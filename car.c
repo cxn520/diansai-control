@@ -19,6 +19,21 @@ float error_right = 0, last_error_right = 0, integral_right = 0;
 // 【注意】位置式的参数量级与增量式完全不同，必须重新调参！
 float Positional_KP_right =1.5, Positional_KI_right = 0.1, Positional_KD_right =0;
 
+/*
+ * 在角度环切换到循迹环时清除速度环历史状态，避免上一阶段的左右
+ * 差速积分继续作用于循迹起始阶段，造成瞬间向错误方向冲出。
+ */
+static void Car_ResetSpeedPIDState(void)
+{
+    error_left = 0.0f;
+    last_error_left = 0.0f;
+    integral_left = 0.0f;
+
+    error_right = 0.0f;
+    last_error_right = 0.0f;
+    integral_right = 0.0f;
+}
+
 
 /***************************************************************************
 函数功能：电机的 位置式PID 闭环控制
@@ -86,7 +101,7 @@ int Velocity_R(int32_t target_right, int32_t encounter_right) {
 float error_angle = 0, last_error_angle = 0, integral_angle = 0;
 
 // 【参数建议】因为不能反转，转向效率会变低，P值可能需要适当调大一点点
-float Angle_KP =0.25, Angle_KI = 0, Angle_KD = 0.2;
+float Angle_KP =0.25, Angle_KI = 0.001, Angle_KD = 0.2;
 float angle_derivative_filtered = 0;
 const float angle_derivative_alpha = 0.15f;
 
@@ -186,19 +201,34 @@ void CarStop()
  
 }
 float pwmout_left,pwmout_right;//实际输出的pwm值
-
+uint8_t Buzz_flag=0;
+int Buzz_cnt=0;
 uint8_t cnt=0;
 
 void TIMER_0_INST_IRQHandler()
 {
-    DL_TimerA_clearInterruptStatus(
-        TIMER_0_INST, DL_TIMERA_INTERRUPT_ZERO_EVENT);
+    static uint8_t previous_line_tracking_active = 0U;
+    uint8_t line_tracking_active;
+
+    DL_TimerA_clearInterruptStatus(TIMER_0_INST, DL_TIMERA_INTERRUPT_ZERO_EVENT);
+
+    Oled_KeyScan_1ms();
+    if(Buzz_flag==1)
+    {
+        DL_GPIO_setPins(BEEP_PORT, BEEP_PIN_29_PIN);  
+        Buzz_cnt++;
+        if(Buzz_cnt==200)
+        {
+            DL_GPIO_clearPins(BEEP_PORT, BEEP_PIN_29_PIN);
+            Buzz_cnt=0;
+            Buzz_flag=0;
+        }
+    }
 
     cnt++;
     if(cnt >= 20)
     {     
         cnt = 0;
-        
         // 1. 直接获取并清零编码器，防止竞态条件导致丢步
         // 假设这里关一下中断或者使用原子操作更佳，如果这是定时器读取则无需担心
         Encoder_left = Get_encoder_Left;
@@ -208,6 +238,15 @@ void TIMER_0_INST_IRQHandler()
 
         /* 根据左右轮本周期平均脉冲数更新累计行走距离。 */
         Distance_Update(Encoder_left, Encoder_right);
+
+        line_tracking_active = (uint8_t)((LineTrack_Flag == 1) &&
+                                         (Yaw_Flag == 0));
+        if ((line_tracking_active != 0U) &&
+            (previous_line_tracking_active == 0U))
+        {
+            Car_ResetSpeedPIDState();
+        }
+        previous_line_tracking_active = line_tracking_active;
 
         // 2. 赋予基础期望速度
         int16_t target_L = target_speed_left;
@@ -221,7 +260,7 @@ void TIMER_0_INST_IRQHandler()
             target_L -= turn_speed;   
             target_R += turn_speed;
         }
-        else if ((LineTrack_Flag == 1)&&(Yaw_Flag == 0))
+        else if (line_tracking_active != 0U)
         {
             int8_t err = LinePID_Error();
             int16_t Line_pid = LinePID_Calc(err);
@@ -242,5 +281,3 @@ void TIMER_0_INST_IRQHandler()
         Set_PWM_Right(pwmout_right);
     }
 }
-
-

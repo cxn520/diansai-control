@@ -11,12 +11,12 @@
 
 #include "ti_msp_dl_config.h"
 #include "stdio.h"
-#include "oled.h"
-#include "board.h"
+#include "System/oled.h"
+#include "System/board.h"
 #include "encoder.h"
-#include "Emm_V5.h"
+#include "System/Emm_V5.h"
 #include "car.h"
-#include "wit.h"
+#include "System/wit.h"
 #include "interrupt.h"
 #include "LineTrack.h"
 #include "stepper.h"
@@ -25,6 +25,6 @@ extern int target_speed_left,target_speed_right;
 extern float pwmout_left,pwmout_right;
 extern int LineTrack_Flag; 
 extern int Yaw_Flag;
+extern int mode;
+extern uint8_t Buzz_flag;
 #endif
-
-

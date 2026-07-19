@@ -98,8 +98,8 @@ void OLED_Refresh(void)
 		}
     }
 }
-//清屏函数
-void OLED_Clear(void)
+/* 仅清空显存，不立即进行耗时的 I2C 整屏传输。 */
+void OLED_ClearBuffer(void)
 {
 	u8 i,n;
 	for(i=0;i<8;i++)
@@ -109,6 +109,13 @@ void OLED_Clear(void)
             OLED_GRAM[n][i]=0;//清除所有数据
         }
   }
+
+}
+
+//清屏函数
+void OLED_Clear(void)
+{
+	OLED_ClearBuffer();
 	OLED_Refresh();//更新显示
 }
 
@@ -242,7 +249,7 @@ void OLED_ShowChar(u8 x,u8 y,u8 chr,u8 size1,u8 mode)
 //size1:字体大小 
 //*chr:字符串起始地址 
 //mode:0,反色显示;1,正常显示
-void OLED_ShowString(u8 x,u8 y,u8 *chr,u8 size1,u8 mode)
+void OLED_ShowString(u8 x,u8 y,const char *chr,u8 size1,u8 mode)
 {
 	while((*chr>=' ')&&(*chr<='~'))//判断是不是非法字符!
 	{
@@ -427,4 +434,3 @@ void OLED_Init(void)
 	OLED_Clear();
 	OLED_WR_Byte(0xAF,OLED_CMD);
 }
-

@@ -22,5 +22,7 @@ extern volatile float distance;
 
 void Distance_Update(int32_t left_count, int32_t right_count);
 void Distance_Reset(void);
-void Oled_Task();
+void Oled_Task(void);
+/* 由 1 ms 定时器中断调用，只做按键消抖、事件记录和刷新计时。 */
+void Oled_KeyScan_1ms(void);
 #endif

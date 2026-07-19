@@ -35,7 +35,7 @@ int target_speed_left =0;
 int target_speed_right=0;
 int LineTrack_Flag=0; 
 int Yaw_Flag=0;
-
+int mode=0;
 int main(void)
 {
     SYSCFG_DL_init();
@@ -64,19 +64,142 @@ int main(void)
     {
         Oled_Task();
         LineTrack();
-        
-        target_angle_offset=0;
-        if(DL_GPIO_readPins(Key_THREE_PORT,Key_THREE_PIN )==0)
+        if(mode==0)
         {
-            DL_GPIO_togglePins(LED_PORT,LED_PIN_22_PIN);
-            LineTrack_Flag=1;
-            while(DL_GPIO_readPins(Key_THREE_PORT,Key_THREE_PIN )==0);
+            Yaw_Flag=0;
+            LineTrack_Flag=0;
         }
-        if(LineTrack_Flag==1)
+        
+        if(mode==1)  //任务1
         {
-            target_speed_left=5;
-            target_speed_right=5;
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_angle_offset=0;
+            target_speed_left=10;
+            target_speed_right=10;
+           if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0))
+                {
+                    CarStop();
+                    Buzz_flag=1;
+                    mode = 0;
+                }
+        }
+        if(mode==2) //任务2-1阶段 直线阶段
+        {
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_angle_offset=0;
+            target_speed_left=20;
+            target_speed_right=20;
+           if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0))
+                {
+                    
+                    mode = 3;
+                }
+        }
+        if(mode==3) //任务2-2阶段 循迹阶段 关闭角度环 开启循迹环
+        {
+            LineTrack_Flag=1;
+            Yaw_Flag=0;
+            target_speed_left=10;
+            target_speed_right=10;
+            if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 停止
+                {
+                    CarStop();
+                    Buzz_flag=1;
+                    mode = 0; //回归开始
+                }
+        }
 
+        if(mode==4)////任务3-1阶段 转弯37度
+        {
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_angle_offset=40;
+            target_speed_left=0;
+            target_speed_right=0;
+            delay_ms(300);
+            Distance_Reset();
+            mode=5;
+        }
+        if(mode==5)//任务3-2阶段 直线行驶100cm
+        {
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_speed_left=10;
+            target_speed_right=10;
+            if(distance>=110)
+            {
+                mode=6;
+            }
+        }
+        if(mode==6)//任务3-3阶段 转回开始的时候 继续直行
+        {
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_angle_offset=0;
+            target_speed_left=10;
+            target_speed_right=10;
+            if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0)) //识别到任意黑色 
+            {
+                mode = 7; //开始
+            }
+        }
+        if(mode==7)//任务3-3阶段 直行时遇到黑线开始 循迹
+        {
+             Yaw_Flag=0;
+             LineTrack_Flag=1;
+             target_speed_left=10;
+             target_speed_right=10;
+            if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 停止
+                {
+                    Buzz_flag=1;
+                    mode = 8; 
+                }
+        }
+        if(mode==8)//任务3-4阶段 反向拐弯 角度环开启
+        {
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_angle_offset=137;
+            target_speed_left=0;
+            target_speed_right=0;
+            delay_ms(300);
+            Distance_Reset();
+            mode=9;
+        }
+        if(mode==9)//任务3-5 反向拐弯后 直线100mm
+        {
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_speed_left=10;
+            target_speed_right=10;
+            if(distance>=115)
+            {
+                mode=10;
+            }
+        }
+        if(mode==10)//任务3-6 再次拐弯直线行驶
+        {
+            Yaw_Flag=1;
+            LineTrack_Flag=0;
+            target_angle_offset=180;
+            if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0)) //识别到任意黑色 
+            {
+                mode = 11; //开始
+            }
+        }
+        if(mode==11)//任务3-7 循迹
+        {
+            Yaw_Flag=0;
+            LineTrack_Flag=1;
+            target_speed_left=10;
+            target_speed_right=10;
+            if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 停止
+                {
+                    Buzz_flag=1;
+                    mode = 4; 
+                }
         }
     }
 }

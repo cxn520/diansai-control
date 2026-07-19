@@ -12,3 +12,6 @@ Release/
 
 .DS_Store
 Thumbs.db
+
+# Local CCS Theia workspace files contain machine-specific absolute paths.
+*.theia-workspace

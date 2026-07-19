@@ -2,7 +2,7 @@
 #define __STEPPER_H__
 
 #include "main.h"
-#include "Emm_V5.h"
+#include "System/Emm_V5.h"
 #include <stdbool.h>
 
 /* 步进电机地址 (RS485总线) */
