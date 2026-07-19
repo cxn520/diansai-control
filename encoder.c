@@ -2,6 +2,20 @@
 volatile int32_t Get_encoder_Left=0;
 volatile int32_t Get_encoder_Right=0;
 
+/* 小车累计行走距离，单位：cm。 */
+volatile float distance = 0.0f;
+
+void Distance_Update(int32_t left_count, int32_t right_count)
+{
+    float average_count = ((float)left_count + (float)right_count) * 0.5f;
+    distance += average_count * DISTANCE_PER_ENCODER_COUNT_CM;
+}
+
+void Distance_Reset(void)
+{
+    distance = 0.0f;
+}
+
 uint8_t oled_buffer[32];
 
 void Oled_Task()
@@ -59,11 +73,11 @@ void GROUP1_IRQHandler(void)
     {
         if(DL_GPIO_readPins(ENCODER_LEFT_PORT, ENCODER_LEFT_E1B_PIN))
         {
-            Get_encoder_Left--;
+            Get_encoder_Left++;
         }
         else 
         {
-            Get_encoder_Left++;
+            Get_encoder_Left--;
         }
         DL_GPIO_clearInterruptStatus(GPIOB,ENCODER_LEFT_E1A_PIN);
     }
@@ -71,11 +85,11 @@ void GROUP1_IRQHandler(void)
     {
         if(DL_GPIO_readPins(ENCODER_RIGHT_PORT, ENCODER_RIGHT_E2B_PIN))
         {
-            Get_encoder_Right--;
+            Get_encoder_Right++;
         }
         else 
         {
-            Get_encoder_Right++;
+            Get_encoder_Right--;
         }
         DL_GPIO_clearInterruptStatus(GPIOB,ENCODER_RIGHT_E2A_PIN);
     }

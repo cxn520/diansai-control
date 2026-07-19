@@ -59,21 +59,24 @@ int main(void)
     Stepper_Init();
     delay_ms(200); 
     Stepper_Move_Relative(STEPPER_ADDR_CHASSIS, STEPPER_DIR_CW, 6400); 
-    
     Stepper_Move_Relative(STEPPER_ADDR_CHASSIS, STEPPER_DIR_CW, 6400); 
     while (1) 
     {
         Oled_Task();
         LineTrack();
-       
+        
         target_angle_offset=0;
-        if(DL_GPIO_readPins(Key_PORT,Key_ONE_PIN )==0)
+        if(DL_GPIO_readPins(Key_THREE_PORT,Key_THREE_PIN )==0)
         {
             DL_GPIO_togglePins(LED_PORT,LED_PIN_22_PIN);
-            target_speed_left=2;
-            target_speed_right=2;
             LineTrack_Flag=1;
-            while(DL_GPIO_readPins(Key_PORT,Key_ONE_PIN )==0);
+            while(DL_GPIO_readPins(Key_THREE_PORT,Key_THREE_PIN )==0);
+        }
+        if(LineTrack_Flag==1)
+        {
+            target_speed_left=5;
+            target_speed_right=5;
+
         }
     }
 }

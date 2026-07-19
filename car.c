@@ -162,7 +162,6 @@ void Set_duty(float duty,uint8_t channel) //设置pwm周期
 //CARCONTROL
 void Set_PWM_Left(float pwmleft)
 {
-  DL_GPIO_setPins(CAR_PORT,CAR_AIN2_PIN);
   DL_GPIO_setPins(CAR_PORT,CAR_BIN2_PIN);
   Set_duty(pwmleft/100.0,0);
 }
@@ -170,7 +169,6 @@ void Set_PWM_Left(float pwmleft)
 void Set_PWM_Right(float pwmright)
 {
   DL_GPIO_setPins(CAR_PORT,CAR_AIN2_PIN);
-  DL_GPIO_setPins(CAR_PORT,CAR_BIN2_PIN);
   Set_duty(pwmright/100.0,1);
 }
 
@@ -193,6 +191,9 @@ uint8_t cnt=0;
 
 void TIMER_0_INST_IRQHandler()
 {
+    DL_TimerA_clearInterruptStatus(
+        TIMER_0_INST, DL_TIMERA_INTERRUPT_ZERO_EVENT);
+
     cnt++;
     if(cnt >= 20)
     {     
@@ -205,19 +206,22 @@ void TIMER_0_INST_IRQHandler()
         Encoder_right = Get_encoder_Right; 
         Get_encoder_Right = 0;
 
+        /* 根据左右轮本周期平均脉冲数更新累计行走距离。 */
+        Distance_Update(Encoder_left, Encoder_right);
+
         // 2. 赋予基础期望速度
         int16_t target_L = target_speed_left;
         int16_t target_R = target_speed_right;
 
         // 3. 外环控制 (角度环与循迹环互斥执行，或者根据需求叠加)
-        if (Yaw_Flag == 1)
+        if ((Yaw_Flag == 1)&&(LineTrack_Flag == 0))
         {
             float current_yaw = wit_data.yaw;
             int turn_speed = Angle_Loop(target_angle_offset, current_yaw);
             target_L -= turn_speed;   
             target_R += turn_speed;
         }
-        else if (LineTrack_Flag == 1) 
+        else if ((LineTrack_Flag == 1)&&(Yaw_Flag == 0))
         {
             int8_t err = LinePID_Error();
             int16_t Line_pid = LinePID_Calc(err);
