@@ -12,7 +12,7 @@
 
 /* ----------------------- 可调参数：1 号步进电机（水平） -------------------- */
 #define CAMERA_X_PID_KP                    (5.0f)  /* 误差约 100 时接近单帧输出上限 */
-#define CAMERA_X_PID_KI                    (0.01f)  /* 小积分仅用于消除持续微小偏差 */
+#define CAMERA_X_PID_KI                    (0.0f)   /* 相对位移命令自身会累积，关闭I项防止持续移动 */
 #define CAMERA_X_PID_KD                    (0.20f)  /* 提高首次响应，同时不过度放大抖动 */
 #define CAMERA_X_PID_INTEGRAL_LIMIT        (400.0f)
 #define CAMERA_X_PID_OUTPUT_LIMIT          (400.0f) /* 单帧最大相对运动脉冲数 */
@@ -47,7 +47,7 @@
 
 /* ----------------------- 可调参数：2 号步进电机（上下） -------------------- */
 #define CAMERA_Y_PID_KP                    (5.0f)  /* 与水平轴保持一致的像素到脉冲增益 */
-#define CAMERA_Y_PID_KI                    (0.01f)
+#define CAMERA_Y_PID_KI                    (0.0f)   /* 相对位移命令自身会累积，关闭I项防止持续移动 */
 #define CAMERA_Y_PID_KD                    (0.20f)
 #define CAMERA_Y_PID_INTEGRAL_LIMIT        (400.0f)
 #define CAMERA_Y_PID_OUTPUT_LIMIT          (400.0f) /* 单帧最大相对运动脉冲数 */
@@ -298,14 +298,25 @@ static int32_t Camera_PIDCalculate(int32_t error, CameraPIDState *state,
         return 0;
     }
 
-    state->integral += (float)error;
-    if (state->integral > integral_limit)
+    /*
+     * 步进电机使用相对位移命令时，执行器位置本身已经完成了“积分”。
+     * 当某轴Ki设为0时同步清空积分，避免该轴继续保存无意义的历史误差。
+     */
+    if (ki != 0.0f)
     {
-        state->integral = integral_limit;
+        state->integral += (float)error;
+        if (state->integral > integral_limit)
+        {
+            state->integral = integral_limit;
+        }
+        else if (state->integral < -integral_limit)
+        {
+            state->integral = -integral_limit;
+        }
     }
-    else if (state->integral < -integral_limit)
+    else
     {
-        state->integral = -integral_limit;
+        state->integral = 0.0f;
     }
 
     derivative = (float)error - state->last_error;
@@ -557,14 +568,17 @@ void Camera_PID_Run(void)
     int32_t y;
     int32_t x_output = 0;
     int32_t y_output = 0;
+    int32_t camera_error = 0;
     int32_t imu_error = 0;
     int32_t feedforward_error = 0;
     int32_t combined_x_error = 0;
     float x_output_limit;
+    float x_kd;
     uint8_t new_frame;
     uint8_t reply_pending;
     uint8_t angle_loop_due;
     uint8_t feedforward_pending;
+    uint8_t horizontal_control_due;
 
     /* 用短临界区取得同一帧的 x/y，并立刻允许 UART 中断继续接收。 */
     primask = __get_PRIMASK();
@@ -612,28 +626,31 @@ void Camera_PID_Run(void)
     }
 
     /*
-     * 摄像头新帧、IMU定时更新或距离前馈任一到达，都会触发水平PID。
-     * 因而车辆转弯时，即使K230暂时没有新帧，IMU补偿也不会被阻塞。
+     * 三种误差都按事件消费一次：摄像头坐标只在新帧到达时使用一次，
+     * IMU变化取整后使用一次，距离前馈触发后使用一次。
      */
-    if ((new_frame != 0U) || (angle_loop_due != 0U) ||
-        (feedforward_pending != 0U))
+    camera_error = (new_frame != 0U) ? x : 0;
+    imu_error = (s_camera_pending_imu_error >= 0.0f) ?
+                (int32_t)(s_camera_pending_imu_error + 0.5f) :
+                (int32_t)(s_camera_pending_imu_error - 0.5f);
+    feedforward_error = (s_camera_pending_feedforward_error >= 0.0f) ?
+                        (int32_t)(s_camera_pending_feedforward_error + 0.5f) :
+                        (int32_t)(s_camera_pending_feedforward_error - 0.5f);
+
+    horizontal_control_due = (uint8_t)((new_frame != 0U) ||
+                                       (imu_error != 0) ||
+                                       (feedforward_pending != 0U));
+    if (horizontal_control_due != 0U)
     {
         /*
-         * 先把累计的IMU变化和一次性前馈取整，保留不足1个误差单位的小数余量；
-         * 然后与最新camera_x相加，合成结果才进入唯一一次水平PID计算。
+         * 仅在实际采用某项误差时从待处理量中扣除，保留不足1个误差单位的余量。
+         * 这样10ms定时任务不会反复使用上一帧camera_x并重复发送相对位移。
          */
-        imu_error = (s_camera_pending_imu_error >= 0.0f) ?
-                    (int32_t)(s_camera_pending_imu_error + 0.5f) :
-                    (int32_t)(s_camera_pending_imu_error - 0.5f);
         s_camera_pending_imu_error -= (float)imu_error;
-
-        feedforward_error = (s_camera_pending_feedforward_error >= 0.0f) ?
-                            (int32_t)(s_camera_pending_feedforward_error + 0.5f) :
-                            (int32_t)(s_camera_pending_feedforward_error - 0.5f);
         s_camera_pending_feedforward_error -= (float)feedforward_error;
 
         /* 摄像头反馈、IMU反馈和距离前馈先合成，随后只执行一次水平PID。 */
-        combined_x_error = x + imu_error + feedforward_error;
+        combined_x_error = camera_error + imu_error + feedforward_error;
         camera_imu_error_debug = imu_error;
         camera_combined_x_error_debug = combined_x_error;
         if (feedforward_pending != 0U)
@@ -645,13 +662,30 @@ void Camera_PID_Run(void)
         x_output_limit = ((imu_error != 0) || (feedforward_error != 0)) ?
                          CAMERA_X_PID_IMU_OUTPUT_LIMIT :
                          CAMERA_X_PID_OUTPUT_LIMIT;
+
+        /* 一次性前馈不应污染后续视觉反馈的积分/微分历史。 */
+        if (feedforward_error != 0)
+        {
+            s_camera_x_pid.integral = 0.0f;
+            s_camera_x_pid.last_error = 0.0f;
+            x_kd = 0.0f;
+        }
+        else
+        {
+            x_kd = CAMERA_X_PID_KD;
+        }
         x_output = Camera_RunAxisPID(combined_x_error, &s_camera_x_pid,
                                      CAMERA_X_PID_KP, CAMERA_X_PID_KI,
-                                     CAMERA_X_PID_KD, CAMERA_X_PID_INTEGRAL_LIMIT,
+                                     x_kd, CAMERA_X_PID_INTEGRAL_LIMIT,
                                      x_output_limit, CAMERA_X_DEADBAND,
                                      CAMERA_X_MIN_PULSE);
         camera_angle_output_debug = x_output;
 
+        if (feedforward_error != 0)
+        {
+            s_camera_x_pid.integral = 0.0f;
+            s_camera_x_pid.last_error = 0.0f;
+        }
     }
 
     if (new_frame != 0U)
