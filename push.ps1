@@ -142,6 +142,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Unable to read the branch upstream."
 }
 if ($upstream) {
+    Invoke-Git -Arguments @("fetch", "origin")
+    Invoke-Git -Arguments @("rebase", $upstream)
     Invoke-Git -Arguments @("push")
 }
 else {
