@@ -1,6 +1,12 @@
 #include "Emm_V5.h"
 #include "main.h"
 
+/*
+ * 同一条 RS485 总线连续发送两帧时，必须等上一帧真正离开 UART，
+ * 再给驱动器留出解析及应答时间，否则第二个电机的命令可能被应答冲突破坏。
+ */
+#define EMM_V5_FRAME_GAP_MS    (2U)
+
 /**********************************************************
 ***	Emm_V5.0步进闭环控制例程
 ***	编写作者：ZHANGDATOU
@@ -22,6 +28,14 @@ void usart_SendCmd(uint8_t *cmd, uint8_t len)
         /* 使用 MSPM0 库函数逐字节阻塞发送 */
         DL_UART_Main_transmitDataBlocking(UART_STEPPER_INST, cmd[i]);
     }
+
+    /* transmitDataBlocking 只保证字节写入发送通道，这里继续等移位器发完。 */
+    while (DL_UART_Main_isBusy(UART_STEPPER_INST))
+    {
+    }
+
+    /* 为 EMM_V5 的帧解析和应答预留总线空闲时间。 */
+    delay_ms(EMM_V5_FRAME_GAP_MS);
 }
 
 /**

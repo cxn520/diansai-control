@@ -8,25 +8,26 @@
 /* --------------------------- 可调参数：串口协议 --------------------------- */
 #define CAMERA_RX_BUFFER_SIZE             (24U)    /* 不含起始符和结束符的最大帧长度 */
 #define CAMERA_COORDINATE_LIMIT            (10000)  /* 允许接收的 x/y 最大绝对值 */
+#define CAMERA_REPLY_ENABLE                (1U)     /* 有效帧回传 "ok\r\n"，用于通信测试 */
 
 /* ----------------------- 可调参数：1 号步进电机（水平） -------------------- */
-#define CAMERA_X_PID_KP                    (0.80f)
-#define CAMERA_X_PID_KI                    (0.02f)
-#define CAMERA_X_PID_KD                    (0.10f)
-#define CAMERA_X_PID_INTEGRAL_LIMIT        (1200.0f)
+#define CAMERA_X_PID_KP                    (5.0f)  /* 误差约 100 时接近单帧输出上限 */
+#define CAMERA_X_PID_KI                    (0.01f)  /* 小积分仅用于消除持续微小偏差 */
+#define CAMERA_X_PID_KD                    (0.20f)  /* 提高首次响应，同时不过度放大抖动 */
+#define CAMERA_X_PID_INTEGRAL_LIMIT        (400.0f)
 #define CAMERA_X_PID_OUTPUT_LIMIT          (400.0f) /* 单帧最大相对运动脉冲数 */
-#define CAMERA_X_DEADBAND                  (4)      /* x 在此范围内不再调整 */
+#define CAMERA_X_DEADBAND                  (2)      /* x 在此范围内不再调整 */
 #define CAMERA_X_MIN_PULSE                 (2U)     /* 过小的脉冲命令不发送 */
 #define CAMERA_X_POSITIVE_DIRECTION        STEPPER_DIR_CW
 #define CAMERA_X_NEGATIVE_DIRECTION        STEPPER_DIR_CCW
 
 /* ----------------------- 可调参数：2 号步进电机（上下） -------------------- */
-#define CAMERA_Y_PID_KP                    (0.80f)
-#define CAMERA_Y_PID_KI                    (0.02f)
-#define CAMERA_Y_PID_KD                    (0.10f)
-#define CAMERA_Y_PID_INTEGRAL_LIMIT        (1200.0f)
+#define CAMERA_Y_PID_KP                    (5.0f)  /* 与水平轴保持一致的像素到脉冲增益 */
+#define CAMERA_Y_PID_KI                    (0.01f)
+#define CAMERA_Y_PID_KD                    (0.20f)
+#define CAMERA_Y_PID_INTEGRAL_LIMIT        (400.0f)
 #define CAMERA_Y_PID_OUTPUT_LIMIT          (400.0f) /* 单帧最大相对运动脉冲数 */
-#define CAMERA_Y_DEADBAND                  (4)      /* y 在此范围内不再调整 */
+#define CAMERA_Y_DEADBAND                  (2)      /* y 在此范围内不再调整 */
 #define CAMERA_Y_MIN_PULSE                 (2U)     /* 过小的脉冲命令不发送 */
 #define CAMERA_Y_POSITIVE_DIRECTION        STEPPER_DIR_CW
 #define CAMERA_Y_NEGATIVE_DIRECTION        STEPPER_DIR_CCW
@@ -35,6 +36,7 @@
 volatile int32_t camera_x = 0;
 volatile int32_t camera_y = 0;
 volatile uint8_t camera_new_frame = 0U;
+volatile uint8_t camera_reply_pending = 0U;
 volatile uint32_t camera_valid_frame_count = 0U;
 volatile uint32_t camera_invalid_frame_count = 0U;
 
@@ -167,6 +169,10 @@ static uint8_t Camera_ParseFrame(void)
     camera_x = parsed_x;
     camera_y = parsed_y;
     camera_new_frame = 1U;
+#if (CAMERA_REPLY_ENABLE != 0U)
+    /* 中断只置位标志，回包在主循环完成，避免阻塞接收中断。 */
+    camera_reply_pending = 1U;
+#endif
     camera_valid_frame_count++;
     return 1U;
 }
@@ -259,33 +265,75 @@ static int32_t Camera_PIDCalculate(int32_t error, CameraPIDState *state,
 }
 
 /*
- * @brief 将一个轴的带符号 PID 输出转换为相对脉冲命令。
- * @note 此函数会调用阻塞式 RS485 发送接口，因此只能在主循环中调用。
+ * @brief 计算一个轴的带符号 PID 脉冲输出，并过滤死区内的小命令。
+ * @note 本函数只计算，不访问 RS485；两个轴计算完成后再统一发送。
  */
-static void Camera_RunAxisPID(int32_t error, CameraPIDState *state,
-                              uint8_t motor_addr, uint8_t positive_direction,
-                              uint8_t negative_direction, float kp, float ki,
-                              float kd, float integral_limit, float output_limit,
-                              int32_t deadband, uint32_t min_pulse)
+static int32_t Camera_RunAxisPID(int32_t error, CameraPIDState *state,
+                                float kp, float ki, float kd,
+                                float integral_limit, float output_limit,
+                                int32_t deadband, uint32_t min_pulse)
 {
     int32_t output = Camera_PIDCalculate(error, state, kp, ki, kd,
                                          integral_limit, output_limit, deadband);
-    uint32_t pulse;
 
     if (output == 0)
     {
-        return;
+        return 0;
     }
 
-    pulse = (uint32_t)Camera_Abs32(output);
-    if (pulse < min_pulse)
+    if ((uint32_t)Camera_Abs32(output) < min_pulse)
     {
-        return;
+        return 0;
     }
 
-    Stepper_Move_Relative(motor_addr,
-                          (output > 0) ? positive_direction : negative_direction,
-                          pulse);
+    return output;
+}
+
+/*
+ * @brief 把两个轴的相对位移先写入对应驱动器，再用广播命令同时触发。
+ * @note 这样既避免连续的非同步命令互相干扰，也保证 x/y 同一帧同时起步。
+ */
+static void Camera_RunDualAxis(int32_t x_output, int32_t y_output)
+{
+    uint8_t command_queued = 0U;
+
+    if (x_output != 0)
+    {
+        Stepper_Queue_Relative(STEPPER_ADDR_CHASSIS,
+                               (x_output > 0) ? CAMERA_X_POSITIVE_DIRECTION :
+                                                CAMERA_X_NEGATIVE_DIRECTION,
+                               (uint32_t)Camera_Abs32(x_output));
+        command_queued = 1U;
+    }
+
+    if (y_output != 0)
+    {
+        Stepper_Queue_Relative(STEPPER_ADDR_LIFT,
+                               (y_output > 0) ? CAMERA_Y_POSITIVE_DIRECTION :
+                                                CAMERA_Y_NEGATIVE_DIRECTION,
+                               (uint32_t)Camera_Abs32(y_output));
+        command_queued = 1U;
+    }
+
+    if (command_queued != 0U)
+    {
+        Stepper_Sync_Move(STEPPER_ADDR_BROADCAST);
+    }
+}
+
+/*
+ * @brief 向 K230 回传一帧有效数据的确认消息。
+ * @note 使用 UART3 的阻塞发送，但仅在主循环中调用，不会占用串口接收中断。
+ */
+static void Camera_SendReply(void)
+{
+    static const uint8_t reply[] = {'o', 'k', '\r', '\n'};
+    uint8_t index;
+
+    for (index = 0U; index < sizeof(reply); index++)
+    {
+        DL_UART_Main_transmitDataBlocking(UART_CAMERA_INST, reply[index]);
+    }
 }
 
 /*
@@ -297,6 +345,7 @@ void Camera_Init(void)
     Camera_ResetRxState();
     Camera_PID_Reset();
     camera_new_frame = 0U;
+    camera_reply_pending = 0U;
     camera_x = 0;
     camera_y = 0;
 
@@ -330,11 +379,17 @@ void Camera_PID_Run(void)
     uint32_t primask;
     int32_t x;
     int32_t y;
+    int32_t x_output;
+    int32_t y_output;
+    uint8_t new_frame;
+    uint8_t reply_pending;
 
     /* 用短临界区取得同一帧的 x/y，并立刻允许 UART 中断继续接收。 */
     primask = __get_PRIMASK();
     __disable_irq();
-    if (camera_new_frame == 0U)
+    new_frame = camera_new_frame;
+    reply_pending = camera_reply_pending;
+    if ((new_frame == 0U) && (reply_pending == 0U))
     {
         if (primask == 0U)
         {
@@ -346,23 +401,38 @@ void Camera_PID_Run(void)
     x = camera_x;
     y = camera_y;
     camera_new_frame = 0U;
+    camera_reply_pending = 0U;
     if (primask == 0U)
     {
         __enable_irq();
     }
 
-    /* 1 号为左右控制，2 号为上下控制。 */
-    Camera_RunAxisPID(x, &s_camera_x_pid, STEPPER_ADDR_CHASSIS,
-                      CAMERA_X_POSITIVE_DIRECTION, CAMERA_X_NEGATIVE_DIRECTION,
-                      CAMERA_X_PID_KP, CAMERA_X_PID_KI, CAMERA_X_PID_KD,
-                      CAMERA_X_PID_INTEGRAL_LIMIT, CAMERA_X_PID_OUTPUT_LIMIT,
-                      CAMERA_X_DEADBAND, CAMERA_X_MIN_PULSE);
+#if (CAMERA_REPLY_ENABLE != 0U)
+    if (reply_pending != 0U)
+    {
+        Camera_SendReply();
+    }
+#endif
 
-    Camera_RunAxisPID(y, &s_camera_y_pid, STEPPER_ADDR_LIFT,
-                      CAMERA_Y_POSITIVE_DIRECTION, CAMERA_Y_NEGATIVE_DIRECTION,
-                      CAMERA_Y_PID_KP, CAMERA_Y_PID_KI, CAMERA_Y_PID_KD,
-                      CAMERA_Y_PID_INTEGRAL_LIMIT, CAMERA_Y_PID_OUTPUT_LIMIT,
-                      CAMERA_Y_DEADBAND, CAMERA_Y_MIN_PULSE);
+    if (new_frame == 0U)
+    {
+        return;
+    }
+
+    /* 先完成两个轴的 PID 计算，再一次性下发并统一触发，避免串行命令丢失。 */
+    x_output = Camera_RunAxisPID(x, &s_camera_x_pid,
+                                 CAMERA_X_PID_KP, CAMERA_X_PID_KI,
+                                 CAMERA_X_PID_KD, CAMERA_X_PID_INTEGRAL_LIMIT,
+                                 CAMERA_X_PID_OUTPUT_LIMIT, CAMERA_X_DEADBAND,
+                                 CAMERA_X_MIN_PULSE);
+
+    y_output = Camera_RunAxisPID(y, &s_camera_y_pid,
+                                 CAMERA_Y_PID_KP, CAMERA_Y_PID_KI,
+                                 CAMERA_Y_PID_KD, CAMERA_Y_PID_INTEGRAL_LIMIT,
+                                 CAMERA_Y_PID_OUTPUT_LIMIT, CAMERA_Y_DEADBAND,
+                                 CAMERA_Y_MIN_PULSE);
+
+    Camera_RunDualAxis(x_output, y_output);
 }
 
 /*

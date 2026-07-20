@@ -45,7 +45,7 @@ void Stepper_Home(uint8_t addr, uint8_t mode)
                                 STEPPER_HOME_SPEED,        /* 回零速度 */
                                 STEPPER_HOME_TIMEOUT,      /* 超时时间 */
                                 100,                       /* 碰撞检测转速 */
-                                500,                       /* 碰撞检测电流 mA */
+                                1000,                      /* 碰撞检测电流 mA */
                                 100,                       /* 碰撞检测时间 ms */
                                 false);                    /* 上电不自动回零 */
 
@@ -97,6 +97,22 @@ void Stepper_Move_Relative(uint8_t addr, uint8_t dir, uint32_t steps)
                        steps,
                        false,                                /* 相对运动 */
                        false);                               /* 不同步 */
+}
+
+/***************************************************************************
+函数功能：缓存相对移动命令，等待广播同步触发
+入口参数：addr - 电机地址, dir - 方向, steps - 脉冲数
+返回值  ：无
+***************************************************************************/
+void Stepper_Queue_Relative(uint8_t addr, uint8_t dir, uint32_t steps)
+{
+    Emm_V5_Pos_Control(addr,
+                       dir,
+                       STEPPER_DEFAULT_SPEED,
+                       STEPPER_DEFAULT_ACC,
+                       steps,
+                       false,                                /* 相对运动 */
+                       true);                                /* 等待同步触发 */
 }
 
 /***************************************************************************
