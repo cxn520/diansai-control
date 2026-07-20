@@ -16,10 +16,34 @@
 #define CAMERA_X_PID_KD                    (0.20f)  /* 提高首次响应，同时不过度放大抖动 */
 #define CAMERA_X_PID_INTEGRAL_LIMIT        (400.0f)
 #define CAMERA_X_PID_OUTPUT_LIMIT          (400.0f) /* 单帧最大相对运动脉冲数 */
+#define CAMERA_X_PID_IMU_OUTPUT_LIMIT      (30000.0f) /* 容纳240脉冲/度时完整90°IMU/前馈补偿 */
 #define CAMERA_X_DEADBAND                  (2)      /* x 在此范围内不再调整 */
 #define CAMERA_X_MIN_PULSE                 (2U)     /* 过小的脉冲命令不发送 */
 #define CAMERA_X_POSITIVE_DIRECTION        STEPPER_DIR_CW
 #define CAMERA_X_NEGATIVE_DIRECTION        STEPPER_DIR_CCW
+
+/* -------------------- 可调参数：IMU转角补偿（1号水平轴） -------------------
+ * IMU相邻采样角度变化先换算成与camera_x相同的等效误差，再与camera_x相加，
+ * 合成后的唯一误差才进入水平PID；IMU不再单独产生步进电机命令。
+ * CAMERA_PAN_PULSES_PER_DEGREE使用云台实测的“车体每转1°，水平轴所需补偿脉冲数”。
+ * IMU角度先按该参数换算成脉冲，再除以水平PID的Kp得到等效camera_x误差。
+ */
+#define CAMERA_ANGLE_LOOP_PERIOD_MS          (10U)     /* IMU角度变化采样周期 */
+#define CAMERA_IMU_ANGLE_SOURCE              (wit_data.yaw)
+#define CAMERA_PAN_PULSES_PER_DEGREE         (240.0f)
+#define CAMERA_IMU_COMPENSATION_SIGN         (1.0f)   /* 车体转正角度，摄像头误差向负方向补偿 */
+#define CAMERA_IMU_ERROR_PER_DEGREE          \
+    (CAMERA_PAN_PULSES_PER_DEGREE / CAMERA_X_PID_KP)
+#define CAMERA_IMU_PENDING_ERROR_LIMIT       \
+    (360.0f * CAMERA_IMU_ERROR_PER_DEGREE)   /* 摄像头帧间可累计一整圈，不丢弃90°转弯 */
+
+/* ---------------------- 可调参数：距离转弯前馈 ---------------------------
+ * 直线行驶达到70 cm后，提前给水平轴一个向右90°的前馈误差。
+ * 前馈先与camera_x、IMU误差相加，然后统一进入同一个水平PID。
+ */
+#define CAMERA_FEEDFORWARD_DISTANCE_CM        (70.0f)
+#define CAMERA_FEEDFORWARD_TURN_DEG           (90.0f)
+#define CAMERA_FEEDFORWARD_SIGN               (1.0f)  /* +1使用水平轴正方向提前右转 */
 
 /* ----------------------- 可调参数：2 号步进电机（上下） -------------------- */
 #define CAMERA_Y_PID_KP                    (5.0f)  /* 与水平轴保持一致的像素到脉冲增益 */
@@ -40,6 +64,16 @@ volatile uint8_t camera_reply_pending = 0U;
 volatile uint32_t camera_valid_frame_count = 0U;
 volatile uint32_t camera_invalid_frame_count = 0U;
 
+/* CCS调试观察量：确认“摄像头误差+IMU等效误差→PID”的实际输入。 */
+volatile float camera_imu_angle_debug = 0.0f;
+volatile float camera_imu_delta_debug = 0.0f;
+volatile int32_t camera_imu_error_debug = 0;
+volatile int32_t camera_combined_x_error_debug = 0;
+volatile int32_t camera_angle_output_debug = 0;
+volatile float camera_feedforward_distance_debug = 0.0f;
+volatile int32_t camera_feedforward_error_debug = 0;
+volatile uint8_t camera_feedforward_triggered_debug = 0U;
+
 /* 串口中断内部使用的接收状态，不会被主循环直接访问。 */
 static char s_camera_rx_buffer[CAMERA_RX_BUFFER_SIZE];
 static uint8_t s_camera_rx_length = 0U;
@@ -55,6 +89,17 @@ typedef struct
 static CameraPIDState s_camera_x_pid = {0.0f, 0.0f};
 static CameraPIDState s_camera_y_pid = {0.0f, 0.0f};
 
+/* IMU变化可快于摄像头帧率，先累计，并在本次10ms控制周期立即合入PID。 */
+static volatile uint16_t s_camera_angle_elapsed_ms = 0U;
+static float s_camera_last_imu_angle = 0.0f;
+static float s_camera_pending_imu_error = 0.0f;
+static uint8_t s_camera_imu_angle_initialized = 0U;
+
+/* 距离前馈每段直线只允许触发一次，转弯结束后由主状态机重新使能。 */
+static float s_camera_pending_feedforward_error = 0.0f;
+static uint8_t s_camera_feedforward_pending = 0U;
+static uint8_t s_camera_feedforward_armed = 1U;
+
 /* 供初始化函数调用的公开 PID 状态复位接口。 */
 void Camera_PID_Reset(void);
 
@@ -65,6 +110,22 @@ void Camera_PID_Reset(void);
 static int32_t Camera_Abs32(int32_t value)
 {
     return (value < 0) ? -value : value;
+}
+
+/*
+ * @brief 将IMU角度差限制到[-180, 180]，避免经过边界时产生错误大跳变。
+ */
+static float Camera_Wrap180(float angle)
+{
+    while (angle > 180.0f)
+    {
+        angle -= 360.0f;
+    }
+    while (angle < -180.0f)
+    {
+        angle += 360.0f;
+    }
+    return angle;
 }
 
 /*
@@ -290,6 +351,94 @@ static int32_t Camera_RunAxisPID(int32_t error, CameraPIDState *state,
 }
 
 /*
+ * @brief 累计IMU角度变化对应的摄像头等效误差。
+ * @param imu_angle 当前IMU偏航角。
+ *
+ * 例如车体角度增加90°，等效误差为
+ * -90 * CAMERA_PAN_PULSES_PER_DEGREE / CAMERA_X_PID_KP；
+ * 程序先与camera_x相加，随后只调用一次水平PID。
+ */
+static void Camera_AccumulateImuError(float imu_angle)
+{
+    float imu_delta;
+
+    camera_imu_angle_debug = imu_angle;
+    if (s_camera_imu_angle_initialized == 0U)
+    {
+        s_camera_last_imu_angle = imu_angle;
+        s_camera_imu_angle_initialized = 1U;
+        camera_imu_delta_debug = 0.0f;
+        return;
+    }
+
+    imu_delta = Camera_Wrap180(imu_angle - s_camera_last_imu_angle);
+    s_camera_last_imu_angle = imu_angle;
+    camera_imu_delta_debug = imu_delta;
+
+    s_camera_pending_imu_error += CAMERA_IMU_COMPENSATION_SIGN * imu_delta *
+                                  CAMERA_IMU_ERROR_PER_DEGREE;
+    if (s_camera_pending_imu_error > CAMERA_IMU_PENDING_ERROR_LIMIT)
+    {
+        s_camera_pending_imu_error = CAMERA_IMU_PENDING_ERROR_LIMIT;
+    }
+    else if (s_camera_pending_imu_error < -CAMERA_IMU_PENDING_ERROR_LIMIT)
+    {
+        s_camera_pending_imu_error = -CAMERA_IMU_PENDING_ERROR_LIMIT;
+    }
+}
+
+/*
+ * @brief 根据当前直线里程触发一次向右转弯前馈。
+ * @param distance_cm    当前直线累计里程，单位cm。
+ * @param straight_active 1表示正在直线循迹，0表示停车或转弯。
+ * @note 前馈只写入待合成误差，不直接控制步进电机；真正输出仍由水平PID完成。
+ */
+void Camera_Feedforward_Update(float distance_cm, uint8_t straight_active)
+{
+    float feedforward_error;
+
+    camera_feedforward_distance_debug = distance_cm;
+    if ((straight_active == 0U) ||
+        (s_camera_feedforward_armed == 0U) ||
+        (distance_cm < CAMERA_FEEDFORWARD_DISTANCE_CM))
+    {
+        return;
+    }
+
+    feedforward_error = CAMERA_FEEDFORWARD_SIGN *
+                        CAMERA_FEEDFORWARD_TURN_DEG *
+                        CAMERA_IMU_ERROR_PER_DEGREE;
+    s_camera_pending_feedforward_error += feedforward_error;
+    if (s_camera_pending_feedforward_error > CAMERA_IMU_PENDING_ERROR_LIMIT)
+    {
+        s_camera_pending_feedforward_error = CAMERA_IMU_PENDING_ERROR_LIMIT;
+    }
+    else if (s_camera_pending_feedforward_error < -CAMERA_IMU_PENDING_ERROR_LIMIT)
+    {
+        s_camera_pending_feedforward_error = -CAMERA_IMU_PENDING_ERROR_LIMIT;
+    }
+
+    /* 立即唤醒下一次主循环的水平PID，不依赖摄像头是否刚好有新帧。 */
+    s_camera_feedforward_pending = 1U;
+    s_camera_feedforward_armed = 0U;
+    camera_feedforward_triggered_debug = 1U;
+}
+
+/*
+ * @brief 转弯结束后重新允许下一段直线触发距离前馈。
+ * @note 同时清除未消费的旧前馈，防止下一段继承上一段命令。
+ */
+void Camera_Feedforward_Rearm(void)
+{
+    s_camera_pending_feedforward_error = 0.0f;
+    s_camera_feedforward_pending = 0U;
+    s_camera_feedforward_armed = 1U;
+    camera_feedforward_distance_debug = 0.0f;
+    camera_feedforward_error_debug = 0;
+    camera_feedforward_triggered_debug = 0U;
+}
+
+/*
  * @brief 把两个轴的相对位移先写入对应驱动器，再用广播命令同时触发。
  * @note 这样既避免连续的非同步命令互相干扰，也保证 x/y 同一帧同时起步。
  */
@@ -359,6 +508,18 @@ void Camera_Init(void)
 }
 
 /*
+ * @brief 摄像头角度环的1ms时基入口。
+ * @note 只做饱和计数，应放在现有1ms定时器中断中，不能在这里发送串口命令。
+ */
+void Camera_ControlTick1ms(void)
+{
+    if (s_camera_angle_elapsed_ms < CAMERA_ANGLE_LOOP_PERIOD_MS)
+    {
+        s_camera_angle_elapsed_ms++;
+    }
+}
+
+/*
  * @brief 清除两个步进电机 PID 的积分和微分历史量。
  * @note 切换视觉模式、停止云台或重新回零后可调用，防止旧积分造成突跳。
  */
@@ -368,28 +529,57 @@ void Camera_PID_Reset(void)
     s_camera_x_pid.last_error = 0.0f;
     s_camera_y_pid.integral = 0.0f;
     s_camera_y_pid.last_error = 0.0f;
+    s_camera_angle_elapsed_ms = 0U;
+    s_camera_last_imu_angle = 0.0f;
+    s_camera_pending_imu_error = 0.0f;
+    s_camera_imu_angle_initialized = 0U;
+    s_camera_pending_feedforward_error = 0.0f;
+    s_camera_feedforward_pending = 0U;
+    s_camera_feedforward_armed = 1U;
+    camera_imu_angle_debug = 0.0f;
+    camera_imu_delta_debug = 0.0f;
+    camera_imu_error_debug = 0;
+    camera_combined_x_error_debug = 0;
+    camera_angle_output_debug = 0;
+    camera_feedforward_distance_debug = 0.0f;
+    camera_feedforward_error_debug = 0;
+    camera_feedforward_triggered_debug = 0U;
 }
 
 /*
- * @brief 对最新的一帧摄像头数据执行两个步进电机 PID。
- * @note 每个有效帧只执行一次；若主循环落后，只使用最新帧以避免云台追踪滞后。
+ * @brief 将最新摄像头误差、IMU变化和距离前馈合成后执行步进电机PID。
+ * @note 水平轴可由三种输入触发；上下轴仍然只由摄像头新帧触发。
  */
 void Camera_PID_Run(void)
 {
     uint32_t primask;
     int32_t x;
     int32_t y;
-    int32_t x_output;
-    int32_t y_output;
+    int32_t x_output = 0;
+    int32_t y_output = 0;
+    int32_t imu_error = 0;
+    int32_t feedforward_error = 0;
+    int32_t combined_x_error = 0;
+    float x_output_limit;
     uint8_t new_frame;
     uint8_t reply_pending;
+    uint8_t angle_loop_due;
+    uint8_t feedforward_pending;
 
     /* 用短临界区取得同一帧的 x/y，并立刻允许 UART 中断继续接收。 */
     primask = __get_PRIMASK();
     __disable_irq();
     new_frame = camera_new_frame;
     reply_pending = camera_reply_pending;
-    if ((new_frame == 0U) && (reply_pending == 0U))
+    feedforward_pending = s_camera_feedforward_pending;
+    angle_loop_due = (s_camera_angle_elapsed_ms >=
+                      CAMERA_ANGLE_LOOP_PERIOD_MS) ? 1U : 0U;
+    if (angle_loop_due != 0U)
+    {
+        s_camera_angle_elapsed_ms = 0U;
+    }
+    if ((new_frame == 0U) && (reply_pending == 0U) &&
+        (angle_loop_due == 0U) && (feedforward_pending == 0U))
     {
         if (primask == 0U)
         {
@@ -402,6 +592,7 @@ void Camera_PID_Run(void)
     y = camera_y;
     camera_new_frame = 0U;
     camera_reply_pending = 0U;
+    s_camera_feedforward_pending = 0U;
     if (primask == 0U)
     {
         __enable_irq();
@@ -414,24 +605,66 @@ void Camera_PID_Run(void)
     }
 #endif
 
-    if (new_frame == 0U)
+    if (angle_loop_due != 0U)
     {
-        return;
+        /* 这里只累计IMU等效误差，不单独运行PID，也不直接发送电机命令。 */
+        Camera_AccumulateImuError(CAMERA_IMU_ANGLE_SOURCE);
     }
 
-    /* 先完成两个轴的 PID 计算，再一次性下发并统一触发，避免串行命令丢失。 */
-    x_output = Camera_RunAxisPID(x, &s_camera_x_pid,
-                                 CAMERA_X_PID_KP, CAMERA_X_PID_KI,
-                                 CAMERA_X_PID_KD, CAMERA_X_PID_INTEGRAL_LIMIT,
-                                 CAMERA_X_PID_OUTPUT_LIMIT, CAMERA_X_DEADBAND,
-                                 CAMERA_X_MIN_PULSE);
+    /*
+     * 摄像头新帧、IMU定时更新或距离前馈任一到达，都会触发水平PID。
+     * 因而车辆转弯时，即使K230暂时没有新帧，IMU补偿也不会被阻塞。
+     */
+    if ((new_frame != 0U) || (angle_loop_due != 0U) ||
+        (feedforward_pending != 0U))
+    {
+        /*
+         * 先把累计的IMU变化和一次性前馈取整，保留不足1个误差单位的小数余量；
+         * 然后与最新camera_x相加，合成结果才进入唯一一次水平PID计算。
+         */
+        imu_error = (s_camera_pending_imu_error >= 0.0f) ?
+                    (int32_t)(s_camera_pending_imu_error + 0.5f) :
+                    (int32_t)(s_camera_pending_imu_error - 0.5f);
+        s_camera_pending_imu_error -= (float)imu_error;
 
-    y_output = Camera_RunAxisPID(y, &s_camera_y_pid,
-                                 CAMERA_Y_PID_KP, CAMERA_Y_PID_KI,
-                                 CAMERA_Y_PID_KD, CAMERA_Y_PID_INTEGRAL_LIMIT,
-                                 CAMERA_Y_PID_OUTPUT_LIMIT, CAMERA_Y_DEADBAND,
-                                 CAMERA_Y_MIN_PULSE);
+        feedforward_error = (s_camera_pending_feedforward_error >= 0.0f) ?
+                            (int32_t)(s_camera_pending_feedforward_error + 0.5f) :
+                            (int32_t)(s_camera_pending_feedforward_error - 0.5f);
+        s_camera_pending_feedforward_error -= (float)feedforward_error;
 
+        /* 摄像头反馈、IMU反馈和距离前馈先合成，随后只执行一次水平PID。 */
+        combined_x_error = x + imu_error + feedforward_error;
+        camera_imu_error_debug = imu_error;
+        camera_combined_x_error_debug = combined_x_error;
+        if (feedforward_pending != 0U)
+        {
+            camera_feedforward_error_debug = feedforward_error;
+        }
+
+        /* IMU或前馈参与时放宽上限，确保完整90°命令不被普通视觉限幅截断。 */
+        x_output_limit = ((imu_error != 0) || (feedforward_error != 0)) ?
+                         CAMERA_X_PID_IMU_OUTPUT_LIMIT :
+                         CAMERA_X_PID_OUTPUT_LIMIT;
+        x_output = Camera_RunAxisPID(combined_x_error, &s_camera_x_pid,
+                                     CAMERA_X_PID_KP, CAMERA_X_PID_KI,
+                                     CAMERA_X_PID_KD, CAMERA_X_PID_INTEGRAL_LIMIT,
+                                     x_output_limit, CAMERA_X_DEADBAND,
+                                     CAMERA_X_MIN_PULSE);
+        camera_angle_output_debug = x_output;
+
+    }
+
+    if (new_frame != 0U)
+    {
+        /* 上下轴不受车体水平转角影响，只在摄像头新帧到达时执行。 */
+        y_output = Camera_RunAxisPID(y, &s_camera_y_pid,
+                                     CAMERA_Y_PID_KP, CAMERA_Y_PID_KI,
+                                     CAMERA_Y_PID_KD, CAMERA_Y_PID_INTEGRAL_LIMIT,
+                                     CAMERA_Y_PID_OUTPUT_LIMIT, CAMERA_Y_DEADBAND,
+                                     CAMERA_Y_MIN_PULSE);
+    }
+
+    /* 水平组合误差PID和上下轴PID计算完成后，再统一触发两个步进电机。 */
     Camera_RunDualAxis(x_output, y_output);
 }
 

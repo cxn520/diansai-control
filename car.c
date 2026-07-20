@@ -107,7 +107,8 @@ const float angle_derivative_alpha = 0.15f;
 
 float initial_yaw = 0.0f;
 uint8_t yaw_initialized = 0;
-float target_angle_offset = 0.0f;
+/* 主循环更新、1ms定时器控制中断读取，同时供摄像头目标角补偿读取。 */
+volatile float target_angle_offset = 0.0f;
 
 
 /***************************************************************************
@@ -213,6 +214,7 @@ void TIMER_0_INST_IRQHandler()
     DL_TimerA_clearInterruptStatus(TIMER_0_INST, DL_TIMERA_INTERRUPT_ZERO_EVENT);
 
     Oled_KeyScan_1ms();
+    Camera_ControlTick1ms();
     if(Buzz_flag==1)
     {
         DL_GPIO_setPins(BEEP_PORT, BEEP_PIN_29_PIN);  

@@ -21,6 +21,7 @@
 #include "LineTrack.h"
 #include "stepper.h"
 #include "camera.h"
+#include <math.h>
 extern int target_speed_left,target_speed_right;
 extern float pwmout_left,pwmout_right;
 extern int LineTrack_Flag; 

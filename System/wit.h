@@ -34,7 +34,8 @@ typedef struct {
     int16_t version;
 } WIT_Data_t;
 
-extern WIT_Data_t wit_data;
+/* 该结构体由UART中断更新、主循环和定时器中断读取，必须禁止编译器缓存旧值。 */
+extern volatile WIT_Data_t wit_data;
 
 void WIT_Init(void);
 

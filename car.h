@@ -16,7 +16,7 @@ void CarStop();
 void Motor_Dir_Init(void);  // 电机方向引脚初始化
 int Velocity_L(int32_t target_Left,int32_t encounter_Left);
 int Velocity_R(int32_t target_right, int32_t encounter_right);
-extern float target_angle_offset ;
+extern volatile float target_angle_offset;
 //=========================================================
 
 

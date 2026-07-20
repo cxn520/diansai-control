@@ -2,7 +2,8 @@
 
 uint8_t wit_dmaBuffer[33];
 
-WIT_Data_t wit_data;
+/* UART中断与控制任务共享，volatile保证每次控制计算都重新读取最新IMU数据。 */
+volatile WIT_Data_t wit_data;
 
 void WIT_Init(void)
 {

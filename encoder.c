@@ -13,7 +13,14 @@ void Distance_Update(int32_t left_count, int32_t right_count)
 
 void Distance_Reset(void)
 {
+    uint32_t primask = __get_PRIMASK();
+
+    /* 与编码器GPIO中断、20ms距离累计保持原子，避免复位后混入转弯残余脉冲。 */
+    __disable_irq();
     distance = 0.0f;
+    Get_encoder_Left = 0;
+    Get_encoder_Right = 0;
+    __set_PRIMASK(primask);
 }
 
 #define OLED_MENU_TASK_COUNT              4U
