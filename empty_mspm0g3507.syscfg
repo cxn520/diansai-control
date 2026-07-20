@@ -248,9 +248,9 @@ UART1.DMA_CHANNEL_RX.addressMode       = "f2b";
 UART1.DMA_CHANNEL_RX.srcLength         = "BYTE";
 UART1.DMA_CHANNEL_RX.dstLength         = "BYTE";
 
-UART2.$name                            = "UART_2";
 UART2.interruptPriority                = "2";
 UART2.targetBaudRate                   = 115200;
+UART2.$name                            = "UART_STEPPER";
 UART2.peripheral.$assign               = "UART2";
 UART2.peripheral.rxPin.$assign         = "PB16";
 UART2.peripheral.txPin.$assign         = "PB15";
@@ -264,7 +264,10 @@ UART2.rxPinConfig.onlyInternalResistor = scripting.forceWrite(false);
 UART2.rxPinConfig.passedPeripheralType = scripting.forceWrite("Digital");
 UART2.rxPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric5";
 
-UART3.$name                            = "UART_3";
+UART3.$name                            = "UART_CAMERA";
+UART3.enabledInterrupts                = ["RX"];
+UART3.interruptPriority                = "2";
+UART3.targetBaudRate                   = 921600;
 UART3.peripheral.$assign               = "UART3";
 UART3.peripheral.rxPin.$assign         = "PB13";
 UART3.peripheral.txPin.$assign         = "PB12";

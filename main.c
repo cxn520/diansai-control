@@ -36,10 +36,13 @@ int target_speed_right=0;
 int LineTrack_Flag=0; 
 int Yaw_Flag=0;
 int mode=0;
+extern void Camera_Init(void);
+extern void Camera_PID_Run(void);
 int main(void)
 {
     SYSCFG_DL_init();
-  
+    Camera_Init();
+   
    
     NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);//使能timer
     DL_Timer_startCounter(TIMER_0_INST);//开始计数
@@ -54,7 +57,7 @@ int main(void)
     OLED_ColorTurn(0);//0正常显示，1 反色显示
 
     /* 串口2 - 步进电机通信 (PB15/PB16, RS485总线) */
-    DL_UART_Main_enable(UART_2_INST);
+    DL_UART_Main_enable(UART_STEPPER_INST);
 
     Stepper_Init();
     delay_ms(200); 
@@ -62,6 +65,7 @@ int main(void)
     Stepper_Move_Relative(STEPPER_ADDR_CHASSIS, STEPPER_DIR_CW, 6400); 
     while (1) 
     {
+        Camera_PID_Run(); 
         Oled_Task();
         LineTrack();
         if(mode==0)

@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "MSPM0G3507-Debug",
+            "compilerPath": "C:/ti/ccs2020/ccs/tools/compiler/ti-cgt-armllvm_4.0.3.LTS/bin/tiarmclang.exe",
+            "cStandard": "c11",
+            "intelliSenseMode": "windows-clang-arm",
+            "includePath": [
+                "${workspaceFolder}",
+                "${workspaceFolder}/Debug",
+                "${workspaceFolder}/Debug/syscfg",
+                "C:/ti/mspm0_sdk_2_10_00_04/source",
+                "C:/ti/mspm0_sdk_2_10_00_04/source/third_party/CMSIS/Core/Include"
+            ],
+            "defines": [
+                "__MSPM0G3507__",
+                "__USE_SYSCONFIG__"
+            ]
+        }
+    ],
+    "version": 4
+}

@@ -20,7 +20,7 @@ void usart_SendCmd(uint8_t *cmd, uint8_t len)
     for (uint8_t i = 0; i < len; i++)
     {
         /* 使用 MSPM0 库函数逐字节阻塞发送 */
-        DL_UART_Main_transmitDataBlocking(UART_2_INST, cmd[i]);
+        DL_UART_Main_transmitDataBlocking(UART_STEPPER_INST, cmd[i]);
     }
 }
 
