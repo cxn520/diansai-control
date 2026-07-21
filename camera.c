@@ -1,14 +1,15 @@
 #include "main.h"
 
 /*
- * 摄像头数据帧格式：$x-123y-12#。
- * x、y 均是相对于画面中心的有符号偏差；本模块以 0 为两个轴的目标位置。
+ * 摄像头数据帧格式：$x-123y-12v1#。
+ * x、y 均是相对于画面中心的有符号偏差，v表示目标是否有效。
+ * 为兼容串口助手，省略v时仍按有效目标处理，例如$x10y20#。
  */
 
 /* --------------------------- 可调参数：串口协议 --------------------------- */
 #define CAMERA_RX_BUFFER_SIZE             (24U)    /* 不含起始符和结束符的最大帧长度 */
 #define CAMERA_COORDINATE_LIMIT            (10000)  /* 允许接收的 x/y 最大绝对值 */
-#define CAMERA_REPLY_ENABLE                (1U)     /* 有效帧回传 "ok\r\n"，用于通信测试 */
+#define CAMERA_TARGET_TIMEOUT_MS           (200U)   /* 超时未收到目标帧时自动恢复IMU */
 
 /* ----------------------- 可调参数：1 号步进电机（水平） -------------------- */
 #define CAMERA_X_PID_KP                    (5.0f)  /* 误差约 100 时接近单帧输出上限 */
@@ -19,6 +20,7 @@
 #define CAMERA_X_PID_IMU_OUTPUT_LIMIT      (30000.0f) /* 容纳240脉冲/度时完整90°IMU/前馈补偿 */
 #define CAMERA_X_DEADBAND                  (2)      /* x 在此范围内不再调整 */
 #define CAMERA_X_MIN_PULSE                 (2U)     /* 过小的脉冲命令不发送 */
+#define CAMERA_IMU_SUPPRESS_X_LIMIT        (10)     /* 有效目标进入±10后由视觉独占水平控制 */
 #define CAMERA_X_POSITIVE_DIRECTION        STEPPER_DIR_CW
 #define CAMERA_X_NEGATIVE_DIRECTION        STEPPER_DIR_CCW
 
@@ -30,7 +32,7 @@
  */
 #define CAMERA_ANGLE_LOOP_PERIOD_MS          (10U)     /* IMU角度变化采样周期 */
 #define CAMERA_IMU_ANGLE_SOURCE              (wit_data.yaw)
-#define CAMERA_PAN_PULSES_PER_DEGREE         (240.0f)
+#define CAMERA_PAN_PULSES_PER_DEGREE         (200.0f)
 #define CAMERA_IMU_COMPENSATION_SIGN         (1.0f)   /* 车体转正角度，摄像头误差向负方向补偿 */
 #define CAMERA_IMU_ERROR_PER_DEGREE          \
     (CAMERA_PAN_PULSES_PER_DEGREE / CAMERA_X_PID_KP)
@@ -59,8 +61,8 @@
 /* 摄像头串口中断与主循环之间共享的最新有效坐标。 */
 volatile int32_t camera_x = 0;
 volatile int32_t camera_y = 0;
+volatile uint8_t camera_target_valid = 0U;
 volatile uint8_t camera_new_frame = 0U;
-volatile uint8_t camera_reply_pending = 0U;
 volatile uint32_t camera_valid_frame_count = 0U;
 volatile uint32_t camera_invalid_frame_count = 0U;
 
@@ -73,6 +75,7 @@ volatile int32_t camera_angle_output_debug = 0;
 volatile float camera_feedforward_distance_debug = 0.0f;
 volatile int32_t camera_feedforward_error_debug = 0;
 volatile uint8_t camera_feedforward_triggered_debug = 0U;
+volatile uint8_t camera_imu_suppressed_debug = 0U;
 
 /* 串口中断内部使用的接收状态，不会被主循环直接访问。 */
 static char s_camera_rx_buffer[CAMERA_RX_BUFFER_SIZE];
@@ -94,6 +97,8 @@ static volatile uint16_t s_camera_angle_elapsed_ms = 0U;
 static float s_camera_last_imu_angle = 0.0f;
 static float s_camera_pending_imu_error = 0.0f;
 static uint8_t s_camera_imu_angle_initialized = 0U;
+static uint8_t s_camera_imu_suppressed = 0U;
+static volatile uint16_t s_camera_target_age_ms = CAMERA_TARGET_TIMEOUT_MS + 1U;
 
 /* 距离前馈每段直线只允许触发一次，转弯结束后由主状态机重新使能。 */
 static float s_camera_pending_feedforward_error = 0.0f;
@@ -191,7 +196,8 @@ static uint8_t Camera_ParseSignedValue(uint8_t *index, int32_t *value)
 }
 
 /*
- * @brief 校验并解析完整载荷，例如 "x-123y-12"。
+ * @brief 校验并解析完整载荷，例如 "x-123y-12v1"。
+ * @note v字段可省略；省略时按v=1处理，以兼容原有串口测试格式。
  * @note  本函数只在 UART3 中断内调用，解析长度被严格限制在 24 字节以内。
  */
 static uint8_t Camera_ParseFrame(void)
@@ -199,6 +205,7 @@ static uint8_t Camera_ParseFrame(void)
     uint8_t index = 0U;
     int32_t parsed_x;
     int32_t parsed_y;
+    int32_t parsed_valid = 1;
 
     if ((s_camera_rx_length < 4U) || (s_camera_rx_buffer[index] != 'x'))
     {
@@ -222,6 +229,21 @@ static uint8_t Camera_ParseFrame(void)
         return 0U;
     }
 
+    if (index < s_camera_rx_length)
+    {
+        if (s_camera_rx_buffer[index] != 'v')
+        {
+            return 0U;
+        }
+
+        index++;
+        if ((Camera_ParseSignedValue(&index, &parsed_valid) == 0U) ||
+            ((parsed_valid != 0) && (parsed_valid != 1)))
+        {
+            return 0U;
+        }
+    }
+
     if (index != s_camera_rx_length)
     {
         return 0U;
@@ -229,11 +251,9 @@ static uint8_t Camera_ParseFrame(void)
 
     camera_x = parsed_x;
     camera_y = parsed_y;
+    camera_target_valid = (uint8_t)parsed_valid;
+    s_camera_target_age_ms = 0U;
     camera_new_frame = 1U;
-#if (CAMERA_REPLY_ENABLE != 0U)
-    /* 中断只置位标志，回包在主循环完成，避免阻塞接收中断。 */
-    camera_reply_pending = 1U;
-#endif
     camera_valid_frame_count++;
     return 1U;
 }
@@ -449,6 +469,23 @@ void Camera_Feedforward_Rearm(void)
     camera_feedforward_triggered_debug = 0U;
 }
 
+void Camera_SignalPrepareTurn(float degrees, float sign)
+{
+    float feedforward_error = sign * degrees * CAMERA_IMU_ERROR_PER_DEGREE;
+    s_camera_pending_feedforward_error += feedforward_error;
+    if (s_camera_pending_feedforward_error > CAMERA_IMU_PENDING_ERROR_LIMIT)
+    {
+        s_camera_pending_feedforward_error = CAMERA_IMU_PENDING_ERROR_LIMIT;
+    }
+    else if (s_camera_pending_feedforward_error < -CAMERA_IMU_PENDING_ERROR_LIMIT)
+    {
+        s_camera_pending_feedforward_error = -CAMERA_IMU_PENDING_ERROR_LIMIT;
+    }
+    s_camera_feedforward_pending = 1U;
+    s_camera_feedforward_armed = 0U;
+    camera_feedforward_triggered_debug = 1U;
+}
+
 /*
  * @brief 把两个轴的相对位移先写入对应驱动器，再用广播命令同时触发。
  * @note 这样既避免连续的非同步命令互相干扰，也保证 x/y 同一帧同时起步。
@@ -482,21 +519,6 @@ static void Camera_RunDualAxis(int32_t x_output, int32_t y_output)
 }
 
 /*
- * @brief 向 K230 回传一帧有效数据的确认消息。
- * @note 使用 UART3 的阻塞发送，但仅在主循环中调用，不会占用串口接收中断。
- */
-static void Camera_SendReply(void)
-{
-    static const uint8_t reply[] = {'o', 'k', '\r', '\n'};
-    uint8_t index;
-
-    for (index = 0U; index < sizeof(reply); index++)
-    {
-        DL_UART_Main_transmitDataBlocking(UART_CAMERA_INST, reply[index]);
-    }
-}
-
-/*
  * @brief 初始化摄像头 UART 中断。
  * @note 必须在 main() 中的 SYSCFG_DL_init() 之后调用一次。
  */
@@ -505,9 +527,10 @@ void Camera_Init(void)
     Camera_ResetRxState();
     Camera_PID_Reset();
     camera_new_frame = 0U;
-    camera_reply_pending = 0U;
     camera_x = 0;
     camera_y = 0;
+    camera_target_valid = 0U;
+    s_camera_target_age_ms = CAMERA_TARGET_TIMEOUT_MS + 1U;
 
     while (DL_UART_Main_isRXFIFOEmpty(UART_CAMERA_INST) == false)
     {
@@ -528,6 +551,10 @@ void Camera_ControlTick1ms(void)
     {
         s_camera_angle_elapsed_ms++;
     }
+    if (s_camera_target_age_ms <= CAMERA_TARGET_TIMEOUT_MS)
+    {
+        s_camera_target_age_ms++;
+    }
 }
 
 /*
@@ -544,6 +571,8 @@ void Camera_PID_Reset(void)
     s_camera_last_imu_angle = 0.0f;
     s_camera_pending_imu_error = 0.0f;
     s_camera_imu_angle_initialized = 0U;
+    s_camera_imu_suppressed = 0U;
+    s_camera_target_age_ms = CAMERA_TARGET_TIMEOUT_MS + 1U;
     s_camera_pending_feedforward_error = 0.0f;
     s_camera_feedforward_pending = 0U;
     s_camera_feedforward_armed = 1U;
@@ -555,6 +584,7 @@ void Camera_PID_Reset(void)
     camera_feedforward_distance_debug = 0.0f;
     camera_feedforward_error_debug = 0;
     camera_feedforward_triggered_debug = 0U;
+    camera_imu_suppressed_debug = 0U;
 }
 
 /*
@@ -575,7 +605,7 @@ void Camera_PID_Run(void)
     float x_output_limit;
     float x_kd;
     uint8_t new_frame;
-    uint8_t reply_pending;
+    uint8_t target_valid;
     uint8_t angle_loop_due;
     uint8_t feedforward_pending;
     uint8_t horizontal_control_due;
@@ -584,7 +614,7 @@ void Camera_PID_Run(void)
     primask = __get_PRIMASK();
     __disable_irq();
     new_frame = camera_new_frame;
-    reply_pending = camera_reply_pending;
+    target_valid = camera_target_valid;
     feedforward_pending = s_camera_feedforward_pending;
     angle_loop_due = (s_camera_angle_elapsed_ms >=
                       CAMERA_ANGLE_LOOP_PERIOD_MS) ? 1U : 0U;
@@ -592,8 +622,8 @@ void Camera_PID_Run(void)
     {
         s_camera_angle_elapsed_ms = 0U;
     }
-    if ((new_frame == 0U) && (reply_pending == 0U) &&
-        (angle_loop_due == 0U) && (feedforward_pending == 0U))
+    if ((new_frame == 0U) && (angle_loop_due == 0U) &&
+        (feedforward_pending == 0U))
     {
         if (primask == 0U)
         {
@@ -605,31 +635,49 @@ void Camera_PID_Run(void)
     x = camera_x;
     y = camera_y;
     camera_new_frame = 0U;
-    camera_reply_pending = 0U;
     s_camera_feedforward_pending = 0U;
     if (primask == 0U)
     {
         __enable_irq();
     }
 
-#if (CAMERA_REPLY_ENABLE != 0U)
-    if (reply_pending != 0U)
+    /*
+     * 有效目标进入±10像素后暂停IMU补偿，让视觉反馈独占水平轴。
+     * v=0表示目标丢失，此时立即恢复IMU；仅凭x=0无法区分这两种状态。
+     */
+    if (new_frame != 0U)
     {
-        Camera_SendReply();
+        s_camera_imu_suppressed = (uint8_t)((target_valid != 0U) &&
+            (Camera_Abs32(x) <= CAMERA_IMU_SUPPRESS_X_LIMIT));
+        if (s_camera_imu_suppressed != 0U)
+        {
+            s_camera_pending_imu_error = 0.0f;
+        }
+        camera_imu_suppressed_debug = s_camera_imu_suppressed;
     }
-#endif
+    else if (s_camera_target_age_ms > CAMERA_TARGET_TIMEOUT_MS)
+    {
+        /* 串口中断或K230停止发帧时不能永久维持视觉锁定。 */
+        s_camera_imu_suppressed = 0U;
+        camera_imu_suppressed_debug = 0U;
+    }
 
     if (angle_loop_due != 0U)
     {
         /* 这里只累计IMU等效误差，不单独运行PID，也不直接发送电机命令。 */
         Camera_AccumulateImuError(CAMERA_IMU_ANGLE_SOURCE);
+        if (s_camera_imu_suppressed != 0U)
+        {
+            /* 仍更新IMU基准角，但丢弃补偿量，恢复时不会一次性补回旧转角。 */
+            s_camera_pending_imu_error = 0.0f;
+        }
     }
 
     /*
      * 三种误差都按事件消费一次：摄像头坐标只在新帧到达时使用一次，
      * IMU变化取整后使用一次，距离前馈触发后使用一次。
      */
-    camera_error = (new_frame != 0U) ? x : 0;
+    camera_error = ((new_frame != 0U) && (target_valid != 0U)) ? x : 0;
     imu_error = (s_camera_pending_imu_error >= 0.0f) ?
                 (int32_t)(s_camera_pending_imu_error + 0.5f) :
                 (int32_t)(s_camera_pending_imu_error - 0.5f);
@@ -637,7 +685,8 @@ void Camera_PID_Run(void)
                         (int32_t)(s_camera_pending_feedforward_error + 0.5f) :
                         (int32_t)(s_camera_pending_feedforward_error - 0.5f);
 
-    horizontal_control_due = (uint8_t)((new_frame != 0U) ||
+    horizontal_control_due = (uint8_t)(((new_frame != 0U) &&
+                                        (target_valid != 0U)) ||
                                        (imu_error != 0) ||
                                        (feedforward_pending != 0U));
     if (horizontal_control_due != 0U)
@@ -688,7 +737,7 @@ void Camera_PID_Run(void)
         }
     }
 
-    if (new_frame != 0U)
+    if ((new_frame != 0U) && (target_valid != 0U))
     {
         /* 上下轴不受车体水平转角影响，只在摄像头新帧到达时执行。 */
         y_output = Camera_RunAxisPID(y, &s_camera_y_pid,

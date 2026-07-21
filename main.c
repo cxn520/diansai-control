@@ -30,20 +30,21 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include "main.h"
-void set_target_angle(float angle);
-int target_speed_left =0;
-int target_speed_right=0;
-int LineTrack_Flag=0; 
-int Yaw_Flag=0;
+volatile int target_speed_left =0;
+volatile int target_speed_right=0;
+volatile int LineTrack_Flag=0;
+volatile int Yaw_Flag=0;
+volatile bool turn_flag=0;
+volatile int turn_cnt=0;
 int mode=0;
 int angle=0;
+#define RECTANGLE_TURN_LINE_ARM_ERROR_DEG (35.0f)
 extern void Camera_Init(void);
 extern void Camera_PID_Run(void);
 int main(void)
 {
     SYSCFG_DL_init();
 
-   
    
     NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);//使能timer
     DL_Timer_startCounter(TIMER_0_INST);//开始计数
@@ -73,112 +74,39 @@ int main(void)
         Camera_PID_Run(); 
         Oled_Task();
         LineTrack();
-        if(mode==1) //循迹
+        if(mode==1)
         {
-            Yaw_Flag=0;
-            LineTrack_Flag=1;
-            target_speed_left=5;
-            target_speed_right=5;
-               if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 转弯
-                {
-                  target_angle_offset=90;
-                  mode=2;
-                }
+          LineTrack_Flag=1;
+          target_speed_left=5;
+          target_speed_right=5;
+          if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 切换模式
+          {
+             Camera_SignalPrepareTurn(45.0f, 1.0f);
+              target_speed_left=0;
+              target_speed_right=0;
+              turn_flag=1;
+              mode=2;
+          }
         }
-        else if(mode==2) //转弯
+        if(mode==2)
         {
-            Yaw_Flag=1;
-            LineTrack_Flag=0;
-            target_speed_left=0;
-            target_speed_right=0;
-            if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0)) //识别到任意黑色
+           
+            if(turn_cnt>=500)
             {
-                /* 转弯完成：下一段直线从0 cm重新计数，并重新允许70 cm前馈。 */
-                Distance_Reset();
-                Camera_Feedforward_Rearm();
-                mode = 3;
+              turn_flag=0;
+              turn_cnt=0;
+              mode=3;
             }
         }
-        else if(mode==3) //循迹
+        if(mode==3)
         {
-            Yaw_Flag=0;
-            LineTrack_Flag=1;
-            target_speed_left=5;
-            target_speed_right=5;
-               if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 转弯
-                {
-                 target_angle_offset=180;
-                  mode=4;
-                }
-        }
-        else if(mode==4) //转弯
-        {
-            Yaw_Flag=1;
-            LineTrack_Flag=0;
-            target_speed_left=0;
-            target_speed_right=0;
-               if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0))  //识别到任意黑色
-                {
-                  Distance_Reset();
-                  Camera_Feedforward_Rearm();
-                  mode=5;
-                }
-        }
-        else if(mode==5) //循迹
-        {
-            Yaw_Flag=0;
-            LineTrack_Flag=1;
-            target_speed_left=5;
-            target_speed_right=5;
-               if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 转弯
-                {
-                 target_angle_offset=-90;
-                  mode=6;
-                }
-        }
-        else if(mode==6) //转弯
-        {
-            Yaw_Flag=1;
-            LineTrack_Flag=0;
-            target_speed_left=0;
-            target_speed_right=0;
-               if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0))  //识别到任意黑色
-                {
-                  Distance_Reset();
-                  Camera_Feedforward_Rearm();
-                  mode=7;
-                }
-        }
-        else if(mode==7) //循迹
-        {
-            Yaw_Flag=0;
-            LineTrack_Flag=1;
-            target_speed_left=5;
-            target_speed_right=5;
-               if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1))  //识别到任意黑色
-                {
-                  target_angle_offset=0;
-                  mode=9;
-                }
-        }
-        else if(mode==9) //第四个直角转弯，完成后回到第一段直线
-        {
-            Yaw_Flag=1;
-            LineTrack_Flag=0;
-            target_speed_left=0;
-            target_speed_right=0;
-            if ((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||
-                (hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0))
+          LineTrack_Flag=1;
+          target_speed_left=0;
+          target_speed_right=3;
+           if((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0)) //识别到任意黑色
             {
-                Distance_Reset();
-                Camera_Feedforward_Rearm();
-                mode=1;
+                 mode=1;
             }
         }
-
-        /* 每段直线达到70 cm时，只触发一次向右90°的摄像头前馈。 */
-        Camera_Feedforward_Update(distance,
-            (uint8_t)((mode == 1) || (mode == 3) ||
-                      (mode == 5) || (mode == 7)));
     }
 }

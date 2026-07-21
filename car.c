@@ -105,33 +105,79 @@ float Angle_KP =0.25, Angle_KI = 0.001, Angle_KD = 0.2;
 float angle_derivative_filtered = 0;
 const float angle_derivative_alpha = 0.15f;
 
-float initial_yaw = 0.0f;
-uint8_t yaw_initialized = 0;
-/* 主循环更新、1ms定时器控制中断读取，同时供摄像头目标角补偿读取。 */
+/* 保存给调试界面观察的单次相对转角；真正控制目标在转弯开始时锁存。 */
 volatile float target_angle_offset = 0.0f;
+static volatile float s_turn_target_yaw = 0.0f;
+static volatile uint8_t s_turn_target_valid = 0U;
+
+/* 将任意角度归一化到[-180, 180]，避免IMU跨越±180°时方向翻转。 */
+static float Car_Wrap180(float angle)
+{
+    while (angle > 180.0f) angle -= 360.0f;
+    while (angle < -180.0f) angle += 360.0f;
+    return angle;
+}
+
+/* 每次开始或结束转弯都清除角度环历史，防止上一拐角的积分影响下一次。 */
+static void Car_ResetAnglePIDState(void)
+{
+    error_angle = 0.0f;
+    last_error_angle = 0.0f;
+    integral_angle = 0.0f;
+    angle_derivative_filtered = 0.0f;
+}
+
+/*
+ * 从当前真实yaw开始锁存一个相对转角。
+ * 矩形轨迹每次传入+90°，不再依赖90/180/-90/0绝对序列和最短路径猜方向。
+ */
+void Car_BeginRelativeTurn(float relative_angle, float current_yaw)
+{
+    target_angle_offset = relative_angle;
+    s_turn_target_yaw = Car_Wrap180(current_yaw + relative_angle);
+    s_turn_target_valid = 1U;
+    Car_ResetAnglePIDState();
+}
+
+/* 转弯退出时作废旧目标，防止下次任务继承上一拐角状态。 */
+void Car_EndTurn(void)
+{
+    s_turn_target_valid = 0U;
+    Car_ResetAnglePIDState();
+}
+
+/* 只有已经接近目标角后，主状态机才允许用黑线结束本次转弯。 */
+uint8_t Car_IsTurnNearTarget(float current_yaw, float tolerance_deg)
+{
+    float error;
+
+    if (s_turn_target_valid == 0U)
+    {
+        return 0U;
+    }
+
+    error = Car_Wrap180(s_turn_target_yaw - current_yaw);
+    if (error < 0.0f) error = -error;
+    return (error <= tolerance_deg) ? 1U : 0U;
+}
 
 
 /***************************************************************************
 函数功能：角度位置式PID闭环计算
-入口参数：目标偏转角度(相对上电)，当前偏航角(Yaw)
+入口参数：备用相对转角、当前偏航角(Yaw)；正常由Car_BeginRelativeTurn锁存目标
 返回值  ：转向修正速度 (带符号的差速值)
 ***************************************************************************/
 int Angle_Loop(float target_offset, float current_yaw) {
     float out_turn;
     
-    // 1. 上电第一次调用时，记录初始偏航角
-    if (!yaw_initialized) {
-        initial_yaw = current_yaw;
-        yaw_initialized = 1;
+    /* 兼容外部直接开启Yaw_Flag的旧用法：尚无目标时从当前角建立一次。 */
+    if (s_turn_target_valid == 0U)
+    {
+        Car_BeginRelativeTurn(target_offset, current_yaw);
     }
     
-    // 2. 计算绝对目标角度
-    float target_yaw = initial_yaw + target_offset;
-    
     // 3. 计算误差 (处理优弧劣弧)
-    error_angle = target_yaw - current_yaw;
-    while (error_angle > 180.0f)  error_angle -= 360.0f;
-    while (error_angle < -180.0f) error_angle += 360.0f;
+    error_angle = Car_Wrap180(s_turn_target_yaw - current_yaw);
     
     // 4. 误差累加 (积分项)
     integral_angle += error_angle;
@@ -209,7 +255,9 @@ uint8_t cnt=0;
 void TIMER_0_INST_IRQHandler()
 {
     static uint8_t previous_line_tracking_active = 0U;
+    static uint8_t previous_yaw_active = 0U;
     uint8_t line_tracking_active;
+    uint8_t yaw_active;
 
     DL_TimerA_clearInterruptStatus(TIMER_0_INST, DL_TIMERA_INTERRUPT_ZERO_EVENT);
 
@@ -226,7 +274,10 @@ void TIMER_0_INST_IRQHandler()
             Buzz_flag=0;
         }
     }
-
+    if(turn_flag=1)
+    {
+        turn_cnt++;
+    }
     cnt++;
     if(cnt >= 20)
     {     
@@ -243,22 +294,44 @@ void TIMER_0_INST_IRQHandler()
 
         line_tracking_active = (uint8_t)((LineTrack_Flag == 1) &&
                                          (Yaw_Flag == 0));
+        yaw_active = (uint8_t)((Yaw_Flag == 1) &&
+                               (LineTrack_Flag == 0));
         if ((line_tracking_active != 0U) &&
             (previous_line_tracking_active == 0U))
         {
             Car_ResetSpeedPIDState();
         }
+        if ((yaw_active != 0U) && (previous_yaw_active == 0U))
+        {
+            /* 进入角度环同样清速度积分，避免循迹残留让错误车轮先冲。 */
+            Car_ResetSpeedPIDState();
+        }
         previous_line_tracking_active = line_tracking_active;
+        previous_yaw_active = yaw_active;
 
         // 2. 赋予基础期望速度
         int16_t target_L = target_speed_left;
         int16_t target_R = target_speed_right;
 
         // 3. 外环控制 (角度环与循迹环互斥执行，或者根据需求叠加)
-        if ((Yaw_Flag == 1)&&(LineTrack_Flag == 0))
+        if (yaw_active != 0U)
         {
             float current_yaw = wit_data.yaw;
             int turn_speed = Angle_Loop(target_angle_offset, current_yaw);
+
+            /*
+             * 矩形拐角只允许沿设定方向转动：+90°过程中即使略微超调，
+             * 也只把输出降为0等待黑线，不能让PID改成右转反向纠偏。
+             * 负相对角同理只允许负方向，仍兼容以后需要的右转任务。
+             */
+            if ((target_angle_offset > 0.0f) && (turn_speed < 0))
+            {
+                turn_speed = 0;
+            }
+            else if ((target_angle_offset < 0.0f) && (turn_speed > 0))
+            {
+                turn_speed = 0;
+            }
             target_L -= turn_speed;   
             target_R += turn_speed;
         }

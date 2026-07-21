@@ -22,10 +22,12 @@
 #include "stepper.h"
 #include "camera.h"
 #include <math.h>
-extern int target_speed_left,target_speed_right;
+extern volatile int target_speed_left,target_speed_right;
 extern float pwmout_left,pwmout_right;
-extern int LineTrack_Flag; 
-extern int Yaw_Flag;
+extern volatile int LineTrack_Flag;
+extern volatile int Yaw_Flag;
 extern int mode;
 extern uint8_t Buzz_flag;
+extern volatile bool turn_flag;
+extern volatile int turn_cnt;
 #endif

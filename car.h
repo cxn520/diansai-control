@@ -17,6 +17,9 @@ void Motor_Dir_Init(void);  // 电机方向引脚初始化
 int Velocity_L(int32_t target_Left,int32_t encounter_Left);
 int Velocity_R(int32_t target_right, int32_t encounter_right);
 extern volatile float target_angle_offset;
+void Car_BeginRelativeTurn(float relative_angle, float current_yaw);
+void Car_EndTurn(void);
+uint8_t Car_IsTurnNearTarget(float current_yaw, float tolerance_deg);
 //=========================================================
 
 
