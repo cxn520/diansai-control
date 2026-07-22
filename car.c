@@ -274,7 +274,7 @@ void TIMER_0_INST_IRQHandler()
             Buzz_flag=0;
         }
     }
-    if(turn_flag=1)
+    if(turn_flag==1)
     {
         turn_cnt++;
     }

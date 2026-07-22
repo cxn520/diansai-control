@@ -39,8 +39,6 @@ volatile int turn_cnt=0;
 int mode=0;
 int angle=0;
 #define RECTANGLE_TURN_LINE_ARM_ERROR_DEG (35.0f)
-extern void Camera_Init(void);
-extern void Camera_PID_Run(void);
 int main(void)
 {
     SYSCFG_DL_init();
@@ -71,7 +69,7 @@ int main(void)
     delay_ms(1000);
     while (1) 
     {
-        Camera_PID_Run(); 
+        Camera_Track_Run();
         Oled_Task();
         LineTrack();
         if(mode==1)
@@ -81,7 +79,6 @@ int main(void)
           target_speed_right=5;
           if ((hw1 == 1) && (hw2 == 1) && (hw3 == 1) && (hw4 == 1) &&(hw5 == 1) && (hw6 == 1) && (hw7 == 1) && (hw8 == 1)) //全部识别到白色 切换模式
           {
-             Camera_SignalPrepareTurn(45.0f, 1.0f);
               target_speed_left=0;
               target_speed_right=0;
               turn_flag=1;
@@ -105,7 +102,7 @@ int main(void)
           target_speed_right=3;
            if((hw1 == 0) || (hw2 == 0) || (hw3 == 0) || (hw4 == 0) ||(hw5 == 0) || (hw6 == 0) || (hw7 == 0) || (hw8 == 0)) //识别到任意黑色
             {
-                 mode=1;
+                mode=1;
             }
         }
     }
